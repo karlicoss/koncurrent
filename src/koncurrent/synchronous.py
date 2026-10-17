@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from concurrent.futures import Executor, Future
-from typing import override
+from typing import Any, override
 
 
 class SynchronousExecutor(Executor):
@@ -24,9 +24,24 @@ class SynchronousExecutor(Executor):
       e.g. to opt out of the shared pool for one object, or for debugging and profiling.
     Unlike pool executors, it lets BaseExceptions like KeyboardInterrupt propagate from submit() right away,
       since they happen in the caller's thread.
+
+    It takes the keyword arguments that all stdlib pools share (max_workers, initializer and initargs),
+      so it can stand in for them, e.g. in koncurrent.configure().
+    But it has no workers, so they don't do anything: max_workers is ignored, and initializer is never called.
+    Calling it in the caller's thread instead could break the caller,
+      e.g. a common initializer for process pools makes the workers ignore Ctrl-C.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        max_workers: int | None = None,
+        initializer: Callable[..., object] | None = None,
+        initargs: tuple[Any, ...] = (),
+    ) -> None:
+        # there are no workers, so nothing to size or set up
+        del max_workers, initializer, initargs
+        self._max_workers = 0  # same attribute as stdlib pools, e.g. for default_buffersize()
         self._shutdown = False
 
     @override

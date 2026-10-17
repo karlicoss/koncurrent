@@ -6,16 +6,14 @@ import pytest
 
 from koncurrent import SynchronousExecutor
 
-
-def thread_name() -> str:
-    return threading.current_thread().name
+from .common import thread_name
 
 
 def test_runs_in_calling_thread() -> None:
     """
     The callable runs in the thread that called submit(), not in some worker thread.
     """
-    future = SynchronousExecutor().submit(thread_name)
+    future = SynchronousExecutor().submit(thread_name, None)
     assert future.done()
     assert future.result() == threading.current_thread().name
 
@@ -99,9 +97,23 @@ def test_keyboard_interrupt_propagates_right_away() -> None:
 
 def test_no_submit_after_shutdown() -> None:
     """
-    Like other executors, it refuses new work with RuntimeError after shutdown(), e.g. after leaving a `with executor:` block.
+    Like other executors, it refuses new work with RuntimeError after shutdown(),
+      e.g. after leaving a `with executor:` block.
     """
     executor = SynchronousExecutor()
     executor.shutdown()
     with pytest.raises(RuntimeError):
         executor.submit(int, '1')
+
+
+def test_takes_pool_arguments() -> None:
+    """
+    It takes the keyword arguments that all stdlib pools share,
+      so it can stand in for them, e.g. in koncurrent.configure().
+    There are no workers to size or set up, so max_workers is ignored,
+      and initializer is never called, rather than running in the caller's thread.
+    """
+    calls: list[str] = []
+    executor = SynchronousExecutor(max_workers=4, initializer=calls.append, initargs=('initialized',))
+    assert executor.submit(thread_name, None).result() == threading.current_thread().name
+    assert calls == []
