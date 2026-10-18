@@ -6,13 +6,13 @@ import pytest
 from koncurrent import EXECUTOR_ENV_VAR, WORKERS_ENV_VAR
 
 
-def results[T, R](it: Iterator[tuple[T, R | Exception]]) -> list[R]:
+def results[R](it: Iterator[R | Exception]) -> list[R]:
     """
     The results of map_results(), in input order.
     Raises the first error rather than returning it, so a failing test shows the original exception and its traceback.
     """
     values: list[R] = []
-    for _, res in it:
+    for res in it:
         if isinstance(res, Exception):
             raise res
         values.append(res)

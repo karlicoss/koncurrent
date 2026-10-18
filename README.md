@@ -34,22 +34,27 @@ class DAL:
         self.buffersize: int | None = None  # None: twice the executor's number of workers, or 1 when running serially
 
     def items(self) -> Iterator[dict | Exception]:
-        results = koncurrent.map_results(_parse, self.paths, executor=self.executor, buffersize=self.buffersize)
-        for path, res in results:
-            if isinstance(res, Exception):
-                res.add_note(f'^ while processing {path}')
-                yield res
-            else:
-                yield from res
+        with koncurrent.map_results(_parse, self.paths, executor=self.executor, buffersize=self.buffersize) as results:
+            for path, res in zip(self.paths, results, strict=True):
+                if isinstance(res, Exception):
+                    res.add_note(f'^ while processing {path}')
+                    yield res
+                else:
+                    yield from res
 ```
 
-`map_results` yields `(item, result)` pairs in input order.
+`map_results` yields the results in input order, so zipping them with the items pairs each result with its item.
+For a one-shot iterator, `itertools.tee(items)` gives a copy to zip with,
+  which only keeps about `buffersize` items around, since that's how far the map reads ahead.
 If the function raises an `Exception` for some item, the exception takes the place of the result,
   and later items are still processed.
 Other exceptions (e.g. `KeyboardInterrupt`) and errors from iterating the items propagate, and end the map.
 At most `buffersize` items are submitted ahead of the consumer, so a slow consumer doesn't pile up results in memory.
 Closing the iterator early, e.g. by breaking out of `for ... in map_results(...)`,
   cancels the work that hasn't started yet.
+It's also a context manager that closes it on exit, like `os.scandir()`, as in the example above.
+That matters in a generator like `items()`: a traceback kept around after an exception keeps the generator's frame alive,
+  and an unclosed map in that frame would carry on running its queued work.
 
 The library doesn't choose where `fn` runs, so it has to work in all of these:
 
