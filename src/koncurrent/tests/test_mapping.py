@@ -1,6 +1,7 @@
 import threading
 from collections.abc import Callable
 from concurrent.futures import Executor, Future, ProcessPoolExecutor, ThreadPoolExecutor
+from contextlib import suppress
 from typing import override
 
 import pytest
@@ -28,7 +29,7 @@ def _make_executor(kind: str) -> Executor | None:
 def test_errors_dont_stop_later_items(kind: str) -> None:
     executor = _make_executor(kind)
     try:
-        outcomes = [res for _, res in map_results(int, ['1', 'x', '3'], executor=executor)]
+        outcomes = list(map_results(int, ['1', 'x', '3'], executor=executor))
     finally:
         if executor is not None:
             executor.shutdown()
@@ -81,7 +82,7 @@ def test_serial_doesnt_run_ahead(kind: str) -> None:
     it = map_results(work, range(100), executor=_make_executor(kind))
     assert calls == []  # nothing runs until iteration starts
     for i in range(3):
-        assert next(it) == (i, i)
+        assert next(it) == i
         assert calls == list(range(i + 1))
     it.close()
 
@@ -103,7 +104,7 @@ def test_read_ahead_is_bounded(buffersize: int | None, expected: int) -> None:
     """
     with _CountingExecutor(max_workers=2) as executor:
         it = map_results(str, range(100), executor=executor, buffersize=buffersize)
-        assert next(it) == (0, '0')
+        assert next(it) == '0'
         assert executor.submitted == expected
         it.close()
 
@@ -161,10 +162,39 @@ def test_closing_early_cancels_queued_work() -> None:
     with ThreadPoolExecutor(max_workers=1) as executor:
         try:
             it = map_results(work, range(100), executor=executor, buffersize=4)
-            assert next(it) == (0, 0)
+            assert next(it) == 0
             it.close()
         finally:
             # otherwise a failing assert above would hang on leaving the with block, waiting for the blocked item
             release.set()
+    # item 1 might have started before closing, the rest were still queued and got cancelled
+    assert started in ([0], [0, 1]), started
+
+
+@pytest.mark.parametrize('leave', ['normally', 'with an exception'])
+def test_with_block_cancels_queued_work(leave: str) -> None:
+    """
+    Leaving a with block closes the map, even though something still refers to it, here the variable `it`.
+    In a DAL generator that could be the traceback of an exception kept around, which keeps the generator's frame alive.
+    """
+    started: list[int] = []
+    release = threading.Event()
+
+    def work(x: int) -> int:
+        started.append(x)
+        if x > 0:
+            release.wait()
+        return x
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        try:
+            with suppress(RuntimeError), map_results(work, range(100), executor=executor, buffersize=4) as it:
+                assert next(it) == 0
+                if leave == 'with an exception':
+                    raise RuntimeError
+        finally:
+            # otherwise a failing assert above would hang on leaving the with block, waiting for the blocked item
+            release.set()
+        assert list(it) == []  # closed
     # item 1 might have started before closing, the rest were still queued and got cancelled
     assert started in ([0], [0, 1]), started

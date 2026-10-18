@@ -5,8 +5,10 @@ map_results(), the ordered parallel map that libraries use, and default_buffersi
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable, Generator, Iterable
+from collections.abc import Callable, Generator, Iterable, Iterator
 from concurrent.futures import Executor, Future
+from contextlib import AbstractContextManager
+from typing import override
 
 from .shared import default_executor
 
@@ -38,10 +40,10 @@ def map_results[T, R](
     *,
     executor: Executor | None = None,
     buffersize: int | None = None,
-) -> Generator[tuple[T, R | Exception], None, None]:
+) -> MapResults[R | Exception]:
     """
-    Yields (item, fn(item)) for each item, in input order.
-    If fn raises an Exception, yields (item, exception) instead and carries on with later items.
+    Yields fn(item) for each item, in input order.
+    If fn raises an Exception, yields the exception instead and carries on with later items.
     Other exceptions (e.g. KeyboardInterrupt) and errors from iterating items propagate, which ends the map.
 
     executor: where to run fn.
@@ -53,10 +55,55 @@ def map_results[T, R](
     Closing the iterator early cancels the work that hasn't started yet.
     That also happens once it's garbage collected, e.g. right after breaking out of `for ... in map_results(...)`,
       unless something else still refers to it.
+    The iterator is also a context manager that closes it on exit, like os.scandir(),
+      e.g. `with map_results(...) as results:` in a generator that yields from it.
+    That cancels the queued work even if something still refers to the map, e.g. the traceback of an exception kept around.
     On a process pool, one more item than the running ones may still run, since it's already queued for the workers.
 
-    >>> [res for _, res in map_results(int, ['1', 'x', '3'])]
+    To know which item a result or an error belongs to, zip them, e.g. `zip(paths, map_results(parse, paths), strict=True)`.
+    For a one-shot iterator, `inputs, to_map = itertools.tee(items)` works,
+      and only keeps about buffersize items around, since that's how far the map reads ahead.
+
+    >>> list(map_results(int, ['1', 'x', '3']))
     [1, ValueError("invalid literal for int() with base 10: 'x'"), 3]
+    """
+    return MapResults(_map_results(fn, items, executor=executor, buffersize=buffersize))
+
+
+class MapResults[T](Iterator[T], AbstractContextManager['MapResults[T]', None]):
+    """
+    What map_results() returns: an iterator that's also a context manager closing it on exit, like os.scandir().
+    __iter__() and __enter__() come from the base classes, and both return the MapResults itself.
+    """
+
+    def __init__(self, results: Generator[T, None, None]) -> None:
+        self._results = results
+
+    @override
+    def __next__(self) -> T:
+        return next(self._results)
+
+    def close(self) -> None:
+        """
+        Cancel the work that hasn't started yet.
+        Does nothing once the map is finished.
+        """
+        self._results.close()
+
+    @override
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+
+def _map_results[T, R](
+    fn: Callable[[T], R],
+    items: Iterable[T],
+    *,
+    executor: Executor | None = None,
+    buffersize: int | None = None,
+) -> Generator[R | Exception, None, None]:
+    """
+    The generator behind map_results(), see there.
     """
     if executor is None:
         executor = default_executor()
@@ -69,18 +116,18 @@ def map_results[T, R](
     # - it stops at the first error, whereas here errors are returned and later items carry on
     # - it submits one more item than buffersize: https://github.com/python/cpython/issues/131466
     # - buffersize only exists since 3.14
-    pending: deque[tuple[T, Future[R]]] = deque()
+    pending: deque[Future[R]] = deque()
 
-    def pop_oldest() -> tuple[T, R | Exception]:
-        item, future = pending.popleft()
+    def pop_oldest() -> R | Exception:
+        future = pending.popleft()
         try:
-            return item, future.result()
+            return future.result()
         except Exception as e:
-            return item, e
+            return e
 
     try:
         for item in items:
-            pending.append((item, executor.submit(fn, item)))
+            pending.append(executor.submit(fn, item))
             if len(pending) >= buffersize:
                 yield pop_oldest()
         while len(pending) > 0:
@@ -88,5 +135,5 @@ def map_results[T, R](
     finally:
         # only non-empty when leaving early: the iterator got closed,
         #   or something raised (e.g. iterating items, or Ctrl-C), so drop the work nobody will look at
-        for _, future in pending:
+        for future in pending:
             future.cancel()

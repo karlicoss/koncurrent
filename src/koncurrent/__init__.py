@@ -8,13 +8,14 @@ The app decides whether and how much to parallelise them,
   or by passing an explicit executor.
 """
 
-from .mapping import default_buffersize, map_results
+from .mapping import MapResults, default_buffersize, map_results
 from .shared import EXECUTOR_ENV_VAR, WORKERS_ENV_VAR, configure, default_executor
 from .synchronous import SynchronousExecutor
 
 __all__ = [
     'EXECUTOR_ENV_VAR',
     'WORKERS_ENV_VAR',
+    'MapResults',
     'SynchronousExecutor',
     'configure',
     'default_buffersize',
