@@ -112,18 +112,36 @@ A `ProcessPoolExecutor` needs the app's main script to have an `if __name__ == '
 Environment variables take precedence over `configure()`, e.g. to change things for a single run.
 They only affect the shared pool, not executors passed explicitly.
 
-- `KONCURRENT_EXECUTOR=synchronous` or `KONCURRENT_WORKERS=0`: everything runs serially in the calling thread,
-    regardless of the rest.
-- `KONCURRENT_EXECUTOR=threads` or `processes`: replaces `configure()` completely, including its arguments.
-  The pool has one worker per CPU, unless `KONCURRENT_WORKERS` is set too.
-  That's fewer threads than `ThreadPoolExecutor`'s own default, which is meant for I/O,
-    since koncurrent is meant for CPU-bound work.
-- `KONCURRENT_WORKERS=4`: replaces `max_workers` of the configured executor, without changing its kind,
-    so a configured `SynchronousExecutor` stays serial.
-  Without `configure()`, the pool uses threads on free-threaded builds, and processes otherwise.
-  That goes by the build, so it still uses threads if something turned the GIL back on.
+To enable parallelism with automatic executor selection and sizing:
 
-If nothing sets up parallelism, everything runs serially.
+```bash
+KONCURRENT_EXECUTOR=auto python script.py
+```
+
+Here, `N` is a positive integer, and serial execution runs in the calling thread.
+
+| `KONCURRENT_EXECUTOR` | `KONCURRENT_WORKERS` | `configure()` | Result                                   |
+| --------------------- | -------------------- | ------------- | ---------------------------------------- |
+| Unset                 | Unset                | Not called    | Serial                                   |
+| Unset                 | Unset                | Called        | Configured executor and arguments        |
+| Unset                 | `N`                  | Not called    | Automatic choice, `N` workers            |
+| Unset                 | `N`                  | Called        | Configured executor with `max_workers=N` |
+| `auto`                | Unset                | Any           | Automatic choice, one worker per CPU     |
+| `auto`                | `N`                  | Any           | Automatic choice, `N` workers            |
+| `threads`             | Unset                | Any           | Threads, one per CPU                     |
+| `threads`             | `N`                  | Any           | Threads, `N` workers                     |
+| `processes`           | Unset                | Any           | Processes, one per CPU                   |
+| `processes`           | `N`                  | Any           | Processes, `N` workers                   |
+| `synchronous`         | Any                  | Any           | Serial                                   |
+| Any                   | `0`                  | Any           | Serial                                   |
+
+Automatic choice means threads on free-threaded builds, and processes otherwise.
+That goes by the build, so it still uses threads if something turned the GIL back on.
+
+Choosing `auto`, `threads` or `processes` replaces `configure()` completely, including its arguments.
+When only `KONCURRENT_WORKERS` is set, a configured `SynchronousExecutor` stays serial, since it ignores `max_workers`.
+The default of one thread per CPU is meant for CPU-bound work.
+`ThreadPoolExecutor`'s own default is meant for I/O.
 
 Objects that take an executor, like `DAL.executor` above, can bypass the shared pool,
   e.g. by setting it to a `ThreadPoolExecutor`, or to `koncurrent.SynchronousExecutor()` to run that object serially.
