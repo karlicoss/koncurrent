@@ -318,6 +318,9 @@ _PRECEDENCE = [
     (False,        None,                None,               'serial',     None),
     (False,        None,                '0',                'serial',     None),
     (False,        None,                '2',                'auto',       2),
+    (False,        'auto',              None,               'auto',       None),
+    (False,        'auto',              '0',                'serial',     None),
+    (False,        'auto',              '2',                'auto',       2),
     (False,        'synchronous',       None,               'serial',     None),
     (False,        'synchronous',       '0',                'serial',     None),
     (False,        'synchronous',       '2',                'serial',     None),
@@ -330,6 +333,9 @@ _PRECEDENCE = [
     (True,         None,                None,               'configured', 3),
     (True,         None,                '0',                'serial',     None),
     (True,         None,                '2',                'configured', 2),
+    (True,         'auto',              None,               'auto',       None),
+    (True,         'auto',              '0',                'serial',     None),
+    (True,         'auto',              '2',                'auto',       2),
     (True,         'synchronous',       None,               'serial',     None),
     (True,         'synchronous',       '0',                'serial',     None),
     (True,         'synchronous',       '2',                'serial',     None),
@@ -380,6 +386,7 @@ def test_precedence(
     assert actual == (kind, workers)
 
 
+@pytest.mark.parametrize(('env_executor', 'env_workers'), [(None, '2'), ('auto', None), ('auto', '2')])
 @pytest.mark.parametrize(
     ('free_threaded', 'gil', 'pool_type'),
     [
@@ -392,32 +399,42 @@ def test_precedence(
 def test_kind_follows_build(
     monkeypatch: pytest.MonkeyPatch,
     *,
+    env_executor: str | None,
+    env_workers: str | None,
     free_threaded: bool,
     gil: bool,
     pool_type: type[Executor],
 ) -> None:
     """
-    With only KONCURRENT_WORKERS set, the pool uses whatever can run Python code in parallel on this build:
+    With KONCURRENT_EXECUTOR=auto or only KONCURRENT_WORKERS set,
+      the pool uses whatever can run Python code in parallel on this build:
       threads on free-threaded builds, and processes otherwise.
     It goes by the build rather than by whether the GIL is enabled right now,
       so that something turning the GIL back on doesn't suddenly require picklable functions.
     """
     monkeypatch.setattr(shared, '_FREE_THREADED_BUILD', free_threaded)
     monkeypatch.setattr(shared, '_gil_reenabled', lambda: free_threaded and gil)
-    monkeypatch.setenv(WORKERS_ENV_VAR, '2')
+    if env_executor is not None:
+        monkeypatch.setenv(EXECUTOR_ENV_VAR, env_executor)
+    if env_workers is not None:
+        monkeypatch.setenv(WORKERS_ENV_VAR, env_workers)
     executor = default_executor()
     assert isinstance(executor, shared._SharedExecutor)
     assert isinstance(executor._inner, pool_type)
+    workers = _default_workers(_KINDS[pool_type]) if env_workers is None else int(env_workers)
+    assert executor._max_workers == workers
 
 
-def test_thread_pool_has_one_worker_per_cpu(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize('env_executor', ['threads', 'auto'])
+def test_thread_pool_has_one_worker_per_cpu(monkeypatch: pytest.MonkeyPatch, env_executor: str) -> None:
     """
     koncurrent's own thread pool is meant for CPU-bound work, so it has one worker per CPU,
       rather than ThreadPoolExecutor's default, min(32, cpus + 4), which is meant for I/O.
     """
     # process_cpu_count() only exists since 3.13, and unlike cpu_count() it respects CPU affinity
     monkeypatch.setattr(os, 'process_cpu_count' if sys.version_info >= (3, 13) else 'cpu_count', lambda: 3)
-    monkeypatch.setenv(EXECUTOR_ENV_VAR, 'threads')
+    monkeypatch.setattr(shared, '_FREE_THREADED_BUILD', True)
+    monkeypatch.setenv(EXECUTOR_ENV_VAR, env_executor)
     executor = default_executor()
     assert isinstance(executor, shared._SharedExecutor)
     assert isinstance(executor._inner, ThreadPoolExecutor)
@@ -426,5 +443,5 @@ def test_thread_pool_has_one_worker_per_cpu(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_invalid_executor_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(EXECUTOR_ENV_VAR, 'fibers')
-    with pytest.raises(AssertionError, match='must be synchronous, threads or processes'):
+    with pytest.raises(AssertionError, match='must be synchronous, auto, threads or processes'):
         default_executor()

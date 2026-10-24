@@ -95,17 +95,17 @@ class _SharedExecutor(Executor):
 
 
 type _Config = tuple[Callable[..., Executor], dict[str, Any]]  # the pool's factory and its keyword arguments
-type _PoolKind = Literal['threads', 'processes']
+type _PoolKind = Literal['auto', 'threads', 'processes']
 type _ExecutorKind = Literal['synchronous'] | _PoolKind  # what KONCURRENT_EXECUTOR can be
 
 
 def _env_executor() -> _ExecutorKind | None:
     value = os.environ.get(EXECUTOR_ENV_VAR)
     match value:
-        case None | 'synchronous' | 'threads' | 'processes':
+        case None | 'synchronous' | 'auto' | 'threads' | 'processes':
             return value
         case _:
-            raise AssertionError(f'{EXECUTOR_ENV_VAR} must be synchronous, threads or processes, got {value!r}')
+            raise AssertionError(f'{EXECUTOR_ENV_VAR} must be synchronous, auto, threads or processes, got {value!r}')
 
 
 def _env_workers() -> int | None:
@@ -136,6 +136,10 @@ def _kind_config(kind: _PoolKind) -> _Config:
     How koncurrent creates its own pool of this kind,
       when the environment variables choose the kind rather than configure().
     """
+    if kind == 'auto':
+        # by build rather than by whether the GIL is enabled right now: if an extension module turned it back on,
+        #   switching to processes would suddenly need picklable functions, whereas threads just get a warning
+        kind = 'threads' if _FREE_THREADED_BUILD else 'processes'
     match kind:
         case 'threads':
             # sized for CPU-bound work (e.g. parsing on free-threaded builds), like ProcessPoolExecutor,
@@ -161,9 +165,7 @@ def _pool_config(config: _Config | None, *, env_executor: _PoolKind | None, env_
         factory, kwargs = config
     elif env_workers is not None:
         # nothing says which kind to use, so pick the one that can run Python code in parallel on this build
-        # by build rather than by whether the GIL is enabled right now: if an extension module turned it back on,
-        #   switching to processes would suddenly need picklable functions, whereas threads just get a warning
-        factory, kwargs = _kind_config('threads' if _FREE_THREADED_BUILD else 'processes')
+        factory, kwargs = _kind_config('auto')
     else:
         return None
     if env_workers is not None:
@@ -244,13 +246,14 @@ def default_executor() -> Executor:
     Its shutdown() does nothing, since it's shared by the whole process.
     What you get, from the highest precedence:
     - KONCURRENT_EXECUTOR=synchronous or KONCURRENT_WORKERS=0: a SynchronousExecutor, regardless of anything else.
-    - KONCURRENT_EXECUTOR=threads or processes: that kind of pool, ignoring configure(),
+    - KONCURRENT_EXECUTOR=auto, threads or processes: a pool, ignoring configure(),
         with KONCURRENT_WORKERS workers if that's set, and one per CPU otherwise.
     - configure(): its executor, with max_workers replaced by KONCURRENT_WORKERS if that's set,
         so a configured SynchronousExecutor stays serial.
-    - Only KONCURRENT_WORKERS: threads on free-threaded builds (even if something turned the GIL back on),
-        and processes otherwise.
+    - Only KONCURRENT_WORKERS: a pool with that many workers and the same automatic choice as auto.
     - Nothing: a SynchronousExecutor.
+    Automatic choice means threads on free-threaded builds (even if something turned the GIL back on),
+      and processes otherwise.
     Called from one of the pool's own workers, it's always a SynchronousExecutor,
       so nested maps run inline rather than deadlocking.
     """
